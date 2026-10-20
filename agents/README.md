@@ -22,8 +22,9 @@ AGENT_FILES="CONVENTIONS.md"
 ```
 
 then add `aider` to `WT_AGENTS` and run `wt start <name>`; the image rebuilds only its last layers.
-Run any agent with `wt exec <name> <command>`. Keep API keys out of the image and out of files: put
-`'OPENAI_API_KEY=${localEnv:OPENAI_API_KEY}'` (single quotes) in the profile's `WT_ENV`, and the key
-is read from your shell's environment each time the container is created.
+Run any agent with `wt exec <name> <command>`. Sign in with the agent's own login command, once in
+any worktree: the login lands in its home folder on the shared volume and serves every worktree.
+Prefer that to passing an API key in `WT_ENV`, which `docker inspect` shows to anyone who can run
+Docker on the machine.
 
 Every agent can drive the worktree's Chromium through MCP: `wt mcp <name>` prints the stdio command.

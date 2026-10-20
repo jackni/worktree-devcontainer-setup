@@ -15,7 +15,7 @@ ENV PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright
 
 RUN apt-get update \
  && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-      xfce4 xfce4-terminal dbus-x11 socat netcat-openbsd curl ca-certificates git sudo iproute2 procps \
+      xfce4 xfce4-terminal dbus-x11 socat netcat-openbsd curl ca-certificates gnupg git sudo iproute2 procps \
  && rm -rf /var/lib/apt/lists/*
 
 # devcontainers images ship the user; a plain distro image gets one, with the passwordless sudo that
@@ -44,8 +44,14 @@ RUN f=$(ls /usr/share/kasmvnc/www/assets/ui-*.js) \
     else echo "warning: KasmVNC clipboard patch does not apply to $KASMVNC_VERSION" >&2; fi
 
 # Node runs chrome-devtools-mcp, and most agent CLIs install through npm. A base image's own Node is kept.
+# NodeSource's signed apt repository, added by hand rather than by piping their setup script to bash.
 RUN if ! command -v node >/dev/null; then \
-      curl -fsSL "https://deb.nodesource.com/setup_${NODE_MAJOR}.x" | bash - \
+      install -d -m 0755 /etc/apt/keyrings \
+      && curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key \
+         | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg \
+      && echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_${NODE_MAJOR}.x nodistro main" \
+         > /etc/apt/sources.list.d/nodesource.list \
+      && apt-get update \
       && DEBIAN_FRONTEND=noninteractive apt-get install -y nodejs \
       && rm -rf /var/lib/apt/lists/*; \
     fi \
@@ -54,8 +60,11 @@ RUN if ! command -v node >/dev/null; then \
 # Each new container would otherwise ask before fetching a repo's pinned package manager.
 ENV COREPACK_ENABLE_DOWNLOAD_PROMPT=0
 
-# Playwright's Chromium: noble's apt chromium is a snap stub that cannot run in a container.
-RUN npx -y "playwright@${PLAYWRIGHT_VERSION}" install --with-deps chromium \
+# Playwright's Chromium: noble's apt chromium is a snap stub that cannot run in a container. The
+# CLI is installed at its pinned version only to fetch the browser, then removed.
+RUN npm install -g "playwright@${PLAYWRIGHT_VERSION}" \
+ && playwright install --with-deps chromium \
+ && npm uninstall -g playwright \
  && rm -rf /var/lib/apt/lists/* \
  && chmod -R a+rX "$PLAYWRIGHT_BROWSERS_PATH" \
  && ln -sf "$(find "$PLAYWRIGHT_BROWSERS_PATH" -type f -name chrome -path '*/chromium-*' | head -1)" /usr/local/bin/wt-chromium
