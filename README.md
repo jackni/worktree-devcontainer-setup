@@ -82,6 +82,40 @@ Then ask Claude, for example, "set up wt so I can run two agents on web and api 
 skill keeps the profile at `<workspace>/wt-profile/`, outside the engine, so `claude plugin update`
 and a re-install of the engine never touch it.
 
+The plugin works in Claude Code on a machine with Docker. It does nothing on claude.ai or in Cowork,
+which have no Docker.
+
+### What the plugin and wt run, write and download
+
+Claude shows each command before it runs it. Nothing is sent anywhere by the plugin or by `wt`
+itself, and there is no telemetry.
+
+- **The skill's scripts:**
+  - `check-prereqs.sh` only reads: the git and Docker versions, `docker info`, and whether
+    `127.0.0.1:80` is free.
+  - `install-engine.sh` copies the engine's files into the workspace folder you choose.
+- **`wt` on your machine:**
+  - **Git:** runs git in your repos (`worktree add`, and `fetch` from their remote for a new
+    branch).
+  - **Files:** writes `worktrees/<name>/` in the workspace. When a repo uses husky, it also links
+    `~/.config/husky/init.sh` to `husky-init.sh`; your own `init.sh` is never replaced.
+  - **Docker:** creates Docker networks, volumes and containers.
+  - **Traefik:** runs one `traefik:v3.7` container on `127.0.0.1:80`, which reads the Docker socket,
+    read-only, to find the desktops.
+- **The image build downloads:**
+  - the base image (`mcr.microsoft.com/devcontainers/base:noble` unless the profile sets another);
+  - the distribution's packages;
+  - KasmVNC from its GitHub releases;
+  - Node.js from NodeSource, only when the base image has none;
+  - `chrome-devtools-mcp` and Playwright's Chromium, at pinned versions;
+  - each agent CLI the profile lists, at a pinned version;
+  - whatever the profile's `WT_IMAGE_SETUP` installs.
+- **In the containers:**
+  - `chrome-devtools-mcp` runs with `--no-usage-statistics`.
+  - The agents you start talk to their own providers, as they do on your machine.
+  - API keys you pass with `'KEY=${localEnv:KEY}'` in the profile's `WT_ENV` go into the
+    container's environment and nowhere else.
+
 ## Commands
 
 ```bash
@@ -347,3 +381,7 @@ host. For those repos, commit from the container: `wt exec <name> git -C <repo> 
 | `test/container_test.sh` | Runs `wt-start` with a throwaway profile. |
 | `test/e2e_test.sh` | A real `wt up`/`start`/`down` through the devcontainer CLI and Traefik, with a one-repo profile and a made-up agent. Uses host port 80. |
 | `profiles/<name>/test/` | Each profile's own end-to-end checks. |
+
+## License
+
+GPL-3.0. See [LICENSE](LICENSE).
