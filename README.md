@@ -4,7 +4,28 @@ One container per worktree, each with its own desktop and Chromium at `http://wt
 for any set of repos and any coding agent. A person clicks through the app in the worktree's
 Chromium; an agent edits code in the worktree and drives the same Chromium over MCP.
 
-The problem it solves, how it works and an architecture diagram: [docs/overview.md](docs/overview.md).
+## Why
+
+Coding agents are fast enough that the limit is how many tasks run at once. Running several
+agents on one codebase, or an agent beside you, breaks down quickly, and git worktrees alone fix
+only the first problem:
+
+| Problem | How wt solves it |
+| --- | --- |
+| Two agents in one checkout overwrite each other's edits | Each task gets a git worktree of every repo, on its own branch |
+| Tasks fight over `node_modules` or `.venv`, and one branch's upgrade breaks another's install | Each task's packages live in its own container, on its own volume |
+| Every dev server wants `:3000` | Each container has its own ports, so every task can use `:3000` |
+| Agents need a browser to check their work, and sharing yours mixes logins and tabs | Each task has its own desktop and Chromium, which agents drive over MCP and you watch at `http://wt-<name>.localhost` |
+| A dev container per task, across several repos, caches and agents, is slow to write by hand | `wt up <name> <branch>` generates and starts it from one profile |
+| Every project's tools pile up on your machine | Languages, packages and tools live only in the containers |
+
+Afterwards, `wt down <name>` removes it all. It refuses when that would lose work, such as
+uncommitted changes or `.env` files that exist nowhere else.
+
+The container isolates the environment, not your machine: it is not a sandbox for code you
+wouldn't run on the host (see [What the container isolates](#what-the-container-isolates)).
+
+How it works, with an architecture diagram and the design decisions: [docs/overview.md](docs/overview.md).
 
 ## Layout
 
