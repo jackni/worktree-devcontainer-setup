@@ -1,0 +1,84 @@
+#!/usr/bin/env bash
+# Runs in the container on every start (postStartCommand) and must be safe to re-run.
+# Generic: the ports and folders come from the worktree's .devcontainer/wt.meta (written by wt from
+# the profile), and project steps from the profile's post-start.d/*.sh, mounted at /opt/wt/profile.
+set -euo pipefail
+
+WT_DIR=${WT_DIR:-$PWD}
+WT_PROFILE_MOUNT=${WT_PROFILE_MOUNT:-/opt/wt/profile}
+LOG_DIR=$HOME/.wt-logs
+mkdir -p "$LOG_DIR"
+WT_INFRA=shared WT_NAME=$(basename "$WT_DIR") WT_CONTAINER=$(hostname)
+WT_SHARED_PORTS="" WT_ISOLATABLE_PORTS="" WT_OWNED_DIRS=""
+# shellcheck disable=SC1091
+[ ! -f "$WT_DIR/.devcontainer/wt.meta" ] || . "$WT_DIR/.devcontainer/wt.meta"
+# shellcheck disable=SC1091
+[ ! -f "$WT_DIR/wt.env" ] || . "$WT_DIR/wt.env"
+export WT_DIR WT_NAME WT_INFRA
+
+# Host ports reached through localhost. Isolated mode brings its own services for
+# WT_ISOLATABLE_PORTS (the profile's isolated.sh); WT_SHARED_PORTS stay forwarded either way.
+# The bridge gateway reaches Docker-published ports inside the VM. host.docker.internal lands on the
+# host's loopback, where a VS Code forward of the same port loops back here and forks until OOM.
+# Infra run natively on the host (not in Docker) needs WT_INFRA_HOST=host.docker.internal in wt.env.
+INFRA_HOST=${WT_INFRA_HOST:-$(ip route | awk '/^default/ {print $3; exit}')}
+
+forward() {
+  pgrep -f "TCP-LISTEN:$1,.*TCP:$INFRA_HOST:$1\$" >/dev/null && return 0
+  unforward "$1"   # an older forward to another host
+  setsid -f socat "TCP-LISTEN:$1,bind=127.0.0.1,fork,reuseaddr" "TCP:$INFRA_HOST:$1" \
+    >"$LOG_DIR/socat-$1.log" 2>&1
+}
+
+# Switching a running worktree to isolated leaves the shared-infra forwards holding these ports:
+# the sidecars would fail to bind and the app would keep writing to the shared database.
+unforward() {
+  pkill -f "TCP-LISTEN:$1," >/dev/null 2>&1 || true
+  # Dying forks still hold the port; a rebind straight after pkill fails with EADDRINUSE.
+  for _ in $(seq 1 50); do pgrep -f "TCP-LISTEN:$1," >/dev/null || return 0; sleep 0.1; done
+  pkill -9 -f "TCP-LISTEN:$1," >/dev/null 2>&1 || true
+}
+
+case "$WT_INFRA" in
+  shared)   for p in $WT_ISOLATABLE_PORTS $WT_SHARED_PORTS; do forward "$p"; done ;;
+  isolated) for p in $WT_ISOLATABLE_PORTS; do unforward "$p"; done
+            for p in $WT_SHARED_PORTS; do forward "$p"; done ;;
+  *) echo "wt-start: WT_INFRA must be 'shared' or 'isolated', got '$WT_INFRA'" >&2; exit 1 ;;
+esac
+
+# Docker creates named-volume mount points (caches, agent homes) owned by root.
+for d in $WT_OWNED_DIRS; do
+  if [ -d "$d" ] && [ "$(stat -c %u "$d")" != "$(id -u)" ]; then sudo chown "$(id -u):$(id -g)" "$d"; fi
+done
+
+# The profile's own steps, in name order. A failing hook is reported, but the desktop still starts.
+failed=""
+for hook in "$WT_PROFILE_MOUNT"/post-start.d/*.sh; do
+  [ -e "$hook" ] || continue
+  bash "$hook" || failed="$failed $(basename "$hook")"
+done
+
+if ! pgrep -x Xvnc >/dev/null; then
+  rm -f /tmp/.X1-lock /tmp/.X11-unix/X1   # survive a container restart
+  setsid -f Xvnc :1 -desktop "$WT_CONTAINER" -interface 0.0.0.0 -websocketPort 6901 -sslOnly 0 -disableBasicAuth \
+    -SecurityTypes None -PublicIP 127.0.0.1 -httpd /usr/share/kasmvnc/www \
+    >"$LOG_DIR/xvnc.log" 2>&1
+  for _ in $(seq 1 50); do [ -e /tmp/.X11-unix/X1 ] && break; sleep 0.2; done
+fi
+
+if ! pgrep -x xfce4-session >/dev/null; then
+  DISPLAY=:1 setsid -f dbus-launch --exit-with-session xfce4-session >"$LOG_DIR/xfce.log" 2>&1
+fi
+
+if ! pgrep -f -- '--remote-debugging-port=9222' >/dev/null; then
+  # --disable-infobars hides Chrome for Testing's permanent "only for automated testing" banner.
+  DISPLAY=:1 setsid -f wt-chromium --remote-debugging-port=9222 --user-data-dir="$HOME/.wt-chromium" \
+    --disable-infobars --no-sandbox --disable-dev-shm-usage --no-first-run --no-default-browser-check about:blank \
+    >"$LOG_DIR/chromium.log" 2>&1
+fi
+# Return only once agents can attach.
+for _ in $(seq 1 50); do curl -fs -o /dev/null http://127.0.0.1:9222/json/version && break; sleep 0.2; done
+curl -fs -o /dev/null http://127.0.0.1:9222/json/version || { echo "wt-start: chromium CDP not up, see $LOG_DIR/chromium.log" >&2; exit 1; }
+
+echo "wt-start: desktop :6901, chromium CDP 127.0.0.1:9222, infra=$WT_INFRA, logs $LOG_DIR"
+[ -z "$failed" ] || { echo "wt-start: profile hook(s) failed:$failed" >&2; exit 1; }

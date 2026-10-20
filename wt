@@ -1,0 +1,524 @@
+#!/usr/bin/env bash
+# One devcontainer per worktree, each with its own desktop and Chromium. This script knows no project
+# and no agent: the repos, ports, image and setup come from a profile (profiles/<name>/wt.conf), and
+# each agent from agents/<agent>.sh. See README.md.
+set -euo pipefail
+
+WT_CONFIG=$(cd "$(dirname "$0")" && pwd)
+
+die() { echo "wt: $*" >&2; exit 1; }
+warn() { echo "wt: warning: $*" >&2; }
+
+usage() {
+  cat >&2 <<'EOF'
+usage: wt new   <name> <branch>... [--infra shared|isolated]   one branch per repo, or one for all
+       wt start <name> [--fresh]     --fresh: wipe this worktree's isolated infra data first
+       wt up    <name> <branch>... [--infra shared|isolated]   new + start
+       wt down  <name> [--force]     --force: also delete hand-written ignored files
+       wt sync  <name>               regenerate the worktree's devcontainer.json from the profile
+       wt exec  <name> [command...]  run a command (default: bash) in the worktree folder, in its container
+       wt mcp   <name>               print the stdio command that gives any MCP client the browser
+       wt ls
+The profile is $WT_PROFILE (a name under profiles/, or a folder), else the 'profile' link beside wt.
+EOF
+  exit 2
+}
+
+# --- configuration ---------------------------------------------------------------------------
+
+# Settings the caller's environment overrides, e.g. `WT_BASE_IMAGE=... wt start a1`.
+OVERRIDABLE="WT_HOME WT_REPOS WT_BASE WT_REMOTE WT_AGENTS WT_BASE_IMAGE WT_USER WT_USER_HOME WT_PREFIX WT_DOMAIN WT_NETWORK"
+
+load_config() {
+  local v overrides="" p=${WT_PROFILE:-$WT_CONFIG/profile} http_port=${WT_HTTP_PORT:-80}
+  case $p in */*) ;; *) p=$WT_CONFIG/profiles/$p ;; esac
+  [ -f "$p/wt.conf" ] || die "no profile at $p: set WT_PROFILE to a profile name or folder, or link one: ln -s profiles/<name> '$WT_CONFIG/profile'"
+  WT_PROFILE_DIR=$(cd -P "$p" && pwd)
+  for v in $OVERRIDABLE; do
+    if [ -n "${!v+x}" ]; then overrides="$overrides $v=$(printf %q "${!v}")"; fi
+  done
+  # Defaults. profiles/example/wt.conf documents every setting.
+  WT_HOME=$(cd "$WT_CONFIG/.." && pwd) WT_REPOS="" WT_REPO_LIST="" WT_BASE="" WT_REMOTE=origin
+  WT_AGENTS="" WT_BASE_IMAGE=mcr.microsoft.com/devcontainers/base:noble WT_USER=vscode WT_USER_HOME=""
+  WT_PREFIX=wt- WT_DOMAIN=localhost WT_NETWORK=wt
+  WT_CACHE_DIRS="" WT_IMAGE_SETUP="" WT_ENV=()
+  WT_SHARED_PORTS="" WT_ISOLATABLE_PORTS="" WT_INFRA_PROBE_PORT=""
+  WT_DISPOSABLE_DIRS="" WT_DISPOSABLE_FILES=""
+  # shellcheck disable=SC1091
+  . "$WT_PROFILE_DIR/wt.conf"
+  eval "$overrides"
+  WT_REPOS=${WT_REPOS:-$WT_HOME}
+  # The one Traefik serves every profile, so its port is machine-wide: environment only.
+  WT_HTTP_PORT=$http_port
+  WT_USER_HOME=${WT_USER_HOME:-/home/$WT_USER}
+
+  local conf=$WT_PROFILE_DIR/wt.conf r
+  [ -n "$WT_REPO_LIST" ] || die "$conf: WT_REPO_LIST names no repos"
+  for r in $WT_REPO_LIST; do
+    [[ $r =~ ^[A-Za-z0-9._-]+$ ]] || die "$conf: repo '$r' must be a folder name under WT_REPOS ($WT_REPOS)"
+  done
+  [[ $WT_PREFIX =~ ^[a-z0-9-]*$ ]] || die "$conf: WT_PREFIX may hold only lowercase letters, digits and '-'"
+  [[ $WT_DOMAIN =~ ^[a-z0-9.-]+$ ]] || die "$conf: WT_DOMAIN '$WT_DOMAIN' is not a hostname"
+  [[ $WT_USER =~ ^[a-z_][a-z0-9_-]*$ ]] || die "$conf: WT_USER '$WT_USER' is not a user name"
+  load_agents
+}
+
+# Each agents/<agent>.sh (the profile's own agents/ first) sets:
+#   AGENT_INSTALL  shell run as root at image build, e.g. an npm, pip or curl install
+#   AGENT_HOME     its state folder under the user's home; kept on a volume every worktree shares
+#   AGENT_ENV      array of KEY=VALUE for the container
+#   AGENT_FILES    workspace files ($WT_HOME/<file>) linked into and mounted in every worktree
+load_agents() {
+  local a f
+  AGENTS_SETUP="" AGENTS_HOMES="" AGENTS_FILES="" AGENTS_ENV=()
+  for a in $WT_AGENTS; do
+    [[ $a =~ ^[a-z0-9][a-z0-9_-]*$ ]] || die "agent name '$a' must be lowercase letters, digits, '-' and '_'"
+    f=$WT_PROFILE_DIR/agents/$a.sh
+    [ -f "$f" ] || f=$WT_CONFIG/agents/$a.sh
+    [ -f "$f" ] || die "unknown agent '$a': add agents/$a.sh (see agents/README.md)"
+    AGENT_INSTALL="" AGENT_HOME="" AGENT_FILES="" AGENT_ENV=()
+    # shellcheck disable=SC1090
+    . "$f"
+    [ -z "$AGENT_INSTALL" ] || AGENTS_SETUP="$AGENTS_SETUP$AGENT_INSTALL"$'\n'
+    [ -z "$AGENT_HOME" ] || AGENTS_HOMES="$AGENTS_HOMES $a:$AGENT_HOME"
+    AGENTS_FILES="$AGENTS_FILES $AGENT_FILES"
+    AGENTS_ENV+=(${AGENT_ENV[@]+"${AGENT_ENV[@]}"})
+  done
+}
+
+# --- names and folders -----------------------------------------------------------------------
+
+# The name becomes a hostname label, a container name and a volume prefix.
+valid_name() { [[ $1 =~ ^[a-z0-9][a-z0-9-]{0,30}$ ]]; }
+
+# Every command takes a name; an unchecked one would escape worktrees/ (e.g. 'wt down ../..').
+checked_dir() {
+  valid_name "$1" || die "name '$1' must be lowercase letters, digits and '-' (max 31 chars)"
+  echo "$WT_HOME/worktrees/$1"
+}
+
+# wt.env is the one place the mode lives, so start/down read it the same way wt-start does.
+infra_mode() {
+  local dir=$1 mode=shared
+  [ ! -f "$dir/wt.env" ] || mode=$(sed -n 's/^WT_INFRA=//p' "$dir/wt.env" | tail -1)
+  case "$mode" in
+    shared|isolated) echo "$mode" ;;
+    *) die "$dir/wt.env: WT_INFRA must be 'shared' or 'isolated', got '$mode'" ;;
+  esac
+}
+
+# The profile's isolated.sh owns per-worktree infra: `isolated.sh up|down|purge`.
+isolated() { # name action
+  [ -f "$WT_PROFILE_DIR/isolated.sh" ] || return 0
+  WT_NAME=$1 WT_CONTAINER=$WT_PREFIX$1 bash "$WT_PROFILE_DIR/isolated.sh" "$2"
+}
+
+# Husky sources this file before every hook; husky-init.sh runs a worktree's hooks in its container.
+# Only linked when one of the repos uses husky.
+link_husky_init() {
+  local r uses="" link="${XDG_CONFIG_HOME:-$HOME/.config}/husky/init.sh"
+  for r in $WT_REPO_LIST; do [ ! -d "$WT_REPOS/$r/.husky" ] || uses=1; done
+  [ -n "$uses" ] || return 0
+  if [ -e "$link" ] && [ "$(readlink "$link")" != "$WT_CONFIG/husky-init.sh" ]; then
+    warn "$link is your own; not replacing it, so worktree git hooks fail on the host"
+    return 0
+  fi
+  mkdir -p "$(dirname "$link")"
+  ln -sfn "$WT_CONFIG/husky-init.sh" "$link"
+}
+
+# --- the generated devcontainer --------------------------------------------------------------
+
+js() { # a JSON string
+  local s=$1
+  s=${s//\\/\\\\}; s=${s//\"/\\\"}; s=${s//$'\n'/\\n}; s=${s//$'\t'/\\t}; s=${s//$'\r'/\\r}
+  printf '"%s"' "$s"
+}
+js_list() { local s sep=""; printf '['; for s in "$@"; do printf '%s\n    %s' "$sep" "$(js "$s")"; sep=,; done; printf '\n  ]'; }
+js_env() { local s sep=""; printf '{'; for s in "$@"; do printf '%s\n    %s: %s' "$sep" "$(js "${s%%=*}")" "$(js "${s#*=}")"; sep=,; done; printf '\n  }'; }
+
+# A WT_CACHE_DIRS entry is [label:]path; the volume is <container>-<id>-<label>.
+cache_spec() {
+  case $1 in
+    *:*) label=${1%%:*} path=${1#*:} ;;
+    *) path=$1 label=$(printf %s "$1" | tr -c 'A-Za-z0-9_.-' '-') ;;
+  esac
+}
+
+# The id names the worktree folder, so two workspaces that share a worktree name and prefix never
+# mount, or delete, each other's caches.
+cache_volume() { # container dir label
+  echo "$1-$(cd -P "$2" && pwd | cksum | cut -d' ' -f1)-$3"
+}
+
+bind() { # path [extra options]: mounted at the same path inside
+  case $1 in *,*) die "cannot mount '$1': the devcontainer mount syntax does not allow commas in paths" ;; esac
+  echo "source=$1,target=$1,type=bind${2:-}"
+}
+
+# The worktree's devcontainer.json; reads generate()'s locals.
+devcontainer_json() {
+  cat <<EOF
+// Generated by wt from $WT_PROFILE_DIR/wt.conf on every 'wt new', 'wt start' and 'wt sync'.
+// Edit the profile, not this file.
+{
+  "name": $(js "$c"),
+  "build": {
+    "dockerfile": $(js "$WT_CONFIG/Dockerfile"),
+    "context": $(js "$WT_CONFIG"),
+    "args": {
+      "BASE_IMAGE": $(js "$WT_BASE_IMAGE"),
+      "USERNAME": $(js "$WT_USER"),
+      "IMAGE_SETUP": $(js "$WT_IMAGE_SETUP"),
+      "AGENT_SETUP": $(js "$AGENTS_SETUP")
+    }
+  },
+  "initializeCommand": $(js "docker network create $WT_NETWORK >/dev/null 2>&1 || true"),
+  "workspaceMount": $(js "$(bind "$dir")"),
+  "workspaceFolder": $(js "$dir"),
+  "remoteUser": $(js "$WT_USER"),
+  "runArgs": $(js_list "${runargs[@]}"),
+  "mounts": $(js_list "${mounts[@]}"),
+  "containerEnv": $(js_env "${env[@]}"),
+  // Auto-forwarding a socat infra port binds it on the host's loopback, where host.docker.internal
+  // lands, looping every connection back into the container until it runs out of memory.
+  "otherPortsAttributes": { "onAutoForward": "ignore" },
+  "postStartCommand": "bash /opt/wt/engine/wt-start",
+  "shutdownAction": "stopContainer",
+  "customizations": {
+    "vscode": {
+      // Dev Containers runs a helper process per forwarded connection; a dev server's hundreds of
+      // module requests pinned the CPU. Browse from the worktree's desktop Chromium instead.
+      "settings": { "remote.autoForwardPorts": false, "remote.restoreForwardedPorts": false }
+    }
+  }
+}
+EOF
+}
+
+# devcontainer.json has no loops, so the repo, cache and agent lists are expanded here into the
+# worktree's own .devcontainer/, rewritten on every new/start/sync. wt.meta beside it carries the
+# same facts to wt-start (in the container) and husky-init.sh (on the host).
+generate() {
+  local name=$1 dir=$2 c=$WT_PREFIX$1 r spec label path vol f seen=" " owned="" volumes=""
+  local mounts=() env runargs body hash json=$dir/.devcontainer/devcontainer.json
+  [ ! -L "$dir/.devcontainer" ] || rm "$dir/.devcontainer"   # earlier versions linked the engine here
+  mkdir -p "$dir/.devcontainer"
+
+  for r in $WT_REPO_LIST; do
+    [ -e "$dir/$r/.git" ] || continue
+    # A worktree's .git file names the main checkout's .git by absolute path; mount it at that path.
+    mounts+=("$(bind "$(git -C "$dir/$r" rev-parse --path-format=absolute --git-common-dir)")")
+  done
+  # Cache folders stay off the slow host bind mount: [label:]path, a volume per worktree.
+  for spec in $WT_CACHE_DIRS; do
+    cache_spec "$spec"
+    vol=$(cache_volume "$c" "$dir" "$label")
+    mounts+=("source=$vol,target=$dir/$path,type=volume")
+    owned="$owned $dir/$path" volumes="$volumes $vol"
+  done
+  # Agent state: one volume per agent, shared by every worktree, so one login serves them all.
+  for spec in $AGENTS_HOMES; do
+    mounts+=("source=$WT_PREFIX${spec%%:*},target=$WT_USER_HOME/${spec#*:},type=volume")
+    owned="$owned $WT_USER_HOME/${spec#*:}"
+  done
+  # Workspace instruction files: linked into the worktree, and the target mounted so the link resolves.
+  for f in $AGENTS_FILES; do
+    case $seen in *" $f "*) continue ;; esac
+    seen="$seen$f "
+    [ -e "$WT_HOME/$f" ] || continue
+    [ -e "$dir/$f" ] || [ -L "$dir/$f" ] || ln -s "../../$f" "$dir/$f"
+    mounts+=("$(bind "$WT_HOME/$f")")
+  done
+  # wt-start and the profile's hooks and bin/ run from here, so changing them needs no image rebuild.
+  mounts+=("source=$WT_CONFIG,target=/opt/wt/engine,type=bind,readonly"
+           "source=$WT_PROFILE_DIR,target=/opt/wt/profile,type=bind,readonly")
+  bind "$dir" >/dev/null
+
+  env=("WT_DIR=$dir" "WT_NAME=$name" ${WT_ENV[@]+"${WT_ENV[@]}"} ${AGENTS_ENV[@]+"${AGENTS_ENV[@]}"})
+  # wt.dir is what 'wt down' finds the container by: the name may be another workspace's too.
+  runargs=(--name "$c" --hostname "$c" --network "$WT_NETWORK" --label "wt=$name" --label "wt.dir=$dir"
+    --label "wt.config=@HASH@"
+    --label traefik.enable=true --label "traefik.docker.network=$WT_NETWORK"
+    # KasmVNC 1.5 only checks that an Origin header EXISTS, never its value, and the desktop has no
+    # auth - so without this clause any page in the host browser can open the VNC websocket.
+    --label "traefik.http.routers.$c.rule=Host(\`$c.$WT_DOMAIN\`) && (!HeaderRegexp(\`Origin\`, \`.\`) || HeaderRegexp(\`Origin\`, \`^https?://$c\\.${WT_DOMAIN//./\\.}(:[0-9]+)?\$\`))"
+    --label "traefik.http.services.$c.loadbalancer.server.port=6901")
+
+  body=$(devcontainer_json)
+  # The hash labels the container, so 'wt start' can tell when the config moved under it.
+  hash=$(printf '%s' "$body" | cksum | cut -d' ' -f1)
+  WT_GENERATED_HASH=$hash   # for cmd_start: the container can rewrite wt.meta, so it is not read back
+  body=${body//@HASH@/$hash}
+  # Rewritten only on change: VS Code offers a rebuild whenever the file changes.
+  [ -f "$json" ] && [ "$(cat "$json")" = "$body" ] || printf '%s\n' "$body" > "$json"
+  {
+    echo "# Generated by wt; read by wt-start in the container, and parsed (never run) on the host."
+    printf 'WT_NAME=%q\nWT_CONTAINER=%q\nWT_USER=%q\nWT_CONFIG_HASH=%q\n' "$name" "$c" "$WT_USER" "$hash"
+    printf 'WT_SHARED_PORTS=%q\nWT_ISOLATABLE_PORTS=%q\n' "$WT_SHARED_PORTS" "$WT_ISOLATABLE_PORTS"
+    printf 'WT_OWNED_DIRS=%q\nWT_VOLUMES=%q\n' "${owned# }" "${volumes# }"
+  } > "$dir/.devcontainer/wt.meta"
+}
+
+# --- git -------------------------------------------------------------------------------------
+
+# Where new branches start: WT_BASE, else the remote's default branch.
+base_ref() {
+  local repo=$1 ref
+  if [ -n "$WT_BASE" ]; then echo "$WT_BASE"; return; fi
+  ref=$(git -C "$repo" symbolic-ref -q --short "refs/remotes/$WT_REMOTE/HEAD" 2>/dev/null) \
+    || { git -C "$repo" remote set-head "$WT_REMOTE" --auto >/dev/null 2>&1 \
+         && ref=$(git -C "$repo" symbolic-ref -q --short "refs/remotes/$WT_REMOTE/HEAD" 2>/dev/null); } \
+    || { warn "$repo: no $WT_REMOTE/HEAD to start new branches from; set WT_BASE in the profile"; return 1; }
+  echo "$ref"
+}
+
+# A name that exists only on the remote must track it, or you silently test an empty branch off
+# the base instead of the colleague's code. The fetch only moves remote-tracking refs, so the main
+# checkouts' local branches stay yours.
+add_worktree() {
+  local repo=$1 path=$2 branch=$3 base
+  if git -C "$repo" show-ref --verify --quiet "refs/heads/$branch"; then
+    git -C "$repo" worktree add "$path" "$branch"
+    return
+  fi
+  git -C "$repo" fetch -q "$WT_REMOTE" || { warn "could not fetch $WT_REMOTE in $repo"; return 1; }
+  if git -C "$repo" show-ref --verify --quiet "refs/remotes/$WT_REMOTE/$branch"; then
+    git -C "$repo" worktree add --track -b "$branch" "$path" "$WT_REMOTE/$branch"
+  else
+    base=$(base_ref "$repo") || return 1
+    git -C "$repo" worktree add --no-track -b "$branch" "$path" "$base"
+  fi
+}
+
+# The worktrees in a worktree folder, whatever the profile says today.
+repos_in() {
+  local d
+  for d in "$1"/*/; do [ ! -L "${d%/}" ] && [ -e "$d.git" ] && basename "$d"; done
+  return 0
+}
+
+is_clean() {
+  local out
+  out=$(git -C "$1" status --porcelain) || return 1   # a git error is not "clean"
+  [ -z "$out" ]
+}
+
+# Ignored paths a tool regenerates; everything else that is ignored was written by hand. Erring
+# towards "hand-written" only costs a --force. Profiles add theirs in WT_DISPOSABLE_DIRS/_FILES.
+disposable_re() {
+  local dirs='node_modules|bin|obj|out|build|dist|target|coverage|__pycache__|\.venv|venv|\.pytest_cache|\.mypy_cache|\.ruff_cache|\.tox|\.gradle|\.next|\.nuxt|\.turbo|\.parcel-cache|\.cache|\.nx|\.vs'
+  local files='\.DS_Store|Thumbs\.db'
+  [ -z "$WT_DISPOSABLE_DIRS" ] || dirs="$dirs|$WT_DISPOSABLE_DIRS"
+  [ -z "$WT_DISPOSABLE_FILES" ] || files="$files|$WT_DISPOSABLE_FILES"
+  echo "(^|/)($dirs)(/|\$)|(^|/)($files)\$|\\.(log|pyc|user)\$"
+}
+
+# `git status --porcelain` never lists ignored files, but `git worktree remove` deletes them -
+# local settings and .env files that hold credentials nothing else has.
+# --directory folds a folder holding only ignored files into 'dir/', so unfold any not disposable.
+hand_written_ignored() {
+  local entry re
+  re=$(disposable_re)
+  git -C "$1" ls-files --others --ignored --exclude-standard --directory 2>/dev/null \
+    | grep -Ev "$re" | while IFS= read -r entry; do
+      case $entry in
+        */) git -C "$1" ls-files --others --ignored --exclude-standard -- "$entry" | grep -Ev "$re" ;;
+        *) echo "$entry" ;;
+      esac
+    done || true
+}
+
+# --- commands --------------------------------------------------------------------------------
+
+cmd_new() {
+  [ $# -ge 2 ] || usage
+  local name=$1 infra=shared dir r i=0 branch made="" branches=() n=0
+  shift
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --infra) [ $# -ge 2 ] || die "--infra takes 'shared' or 'isolated'"; infra=$2; shift 2 ;;
+      *) branches+=("$1"); shift ;;
+    esac
+  done
+  case "$infra" in
+    shared) ;;
+    isolated) [ -f "$WT_PROFILE_DIR/isolated.sh" ] || die "the profile has no isolated.sh, so only --infra shared" ;;
+    *) die "--infra takes 'shared' or 'isolated'" ;;
+  esac
+  for r in $WT_REPO_LIST; do n=$((n + 1)); done
+  [ ${#branches[@]} -eq "$n" ] || [ ${#branches[@]} -eq 1 ] \
+    || die "give one branch per repo, in this order: $WT_REPO_LIST (or one branch for all)"
+  dir=$(checked_dir "$name")
+  [ ! -e "$dir" ] || die "$dir already exists"
+  for r in $WT_REPO_LIST; do
+    git -C "$WT_REPOS/$r" rev-parse --git-dir >/dev/null 2>&1 || die "$WT_REPOS/$r is not a git checkout"
+  done
+  mkdir -p "$dir"
+  for r in $WT_REPO_LIST; do
+    if [ ${#branches[@]} -eq 1 ]; then branch=${branches[0]}; else branch=${branches[$i]}; fi
+    i=$((i + 1))
+    if ! add_worktree "$WT_REPOS/$r" "$dir/$r" "$branch"; then
+      for r in $made; do git -C "$WT_REPOS/$r" worktree remove "$dir/$r"; done
+      rm -rf "$dir"; die "could not create the $branch worktree of $r${made:+ (rolled back:$made)}"
+    fi
+    made="$made $r"
+  done
+  echo "WT_INFRA=$infra" > "$dir/wt.env"
+  generate "$name" "$dir"
+  link_husky_init
+  echo "created $dir (infra=$infra)"
+}
+
+cmd_ls() {
+  [ -d "$WT_HOME/worktrees" ] || return 0
+  local d name status
+  for d in "$WT_HOME"/worktrees/*/; do
+    [ -d "$d" ] || continue
+    name=$(basename "$d")
+    status=$(docker ps -a --filter "name=^$WT_PREFIX$name\$" --format '{{.Status}}' 2>/dev/null || true)
+    printf '%s\t%s\n' "$name" "${status:-no container}"
+  done
+}
+
+cmd_down() {
+  local force=""
+  if [ "${2:-}" = --force ]; then force=1; set -- "$1"; fi
+  [ $# -eq 1 ] || usage
+  local name=$1 dir ids r precious vols="" spec label path own v
+  dir=$(checked_dir "$name")
+  [ -d "$dir" ] || die "no worktree '$name'"
+  # Check every repo before removing anything, so a refusal leaves everything in place.
+  for r in $(repos_in "$dir"); do
+    is_clean "$dir/$r" || die "$dir/$r has uncommitted changes; commit or stash them first"
+    [ -n "$force" ] && continue
+    precious=$(hand_written_ignored "$dir/$r")
+    [ -z "$precious" ] || die "$dir/$r has ignored files that removal would delete:
+$(echo "$precious" | sed 's/^/  /')
+copy them out, or re-run: wt down $name --force"
+  done
+  docker info >/dev/null 2>&1 || die "Docker is not running; start it so 'down' can remove the container and volumes"
+  isolated "$name" purge
+  # Only this folder's container. One made before the wt.dir label is matched by the devcontainer
+  # CLI's own folder label; if that differs, it is left alone rather than risk another workspace's.
+  ids=$(docker ps -aq --filter "label=wt.dir=$dir")
+  if [ -z "$ids" ] && [ "$(docker inspect -f '{{index .Config.Labels "devcontainer.local_folder"}}' \
+       "$WT_PREFIX$name" 2>/dev/null)" = "$dir" ]; then
+    ids=$WT_PREFIX$name
+  fi
+  [ -z "$ids" ] || docker rm -f -v $ids >/dev/null
+  # The volumes recorded at creation, in case the profile's cache list has changed since. The
+  # container can write wt.meta, so it is parsed, never run, and only this worktree's names count.
+  own=$(cache_volume "$WT_PREFIX$name" "$dir" "")
+  if [ -f "$dir/.devcontainer/wt.meta" ]; then
+    for v in $(sed -n 's/^WT_VOLUMES=//p' "$dir/.devcontainer/wt.meta" | tr -d "\\\\'\""); do
+      if [[ $v == "$own"* && $v =~ ^[A-Za-z0-9_.-]+$ ]]; then vols="$vols $v"; fi
+    done
+  fi
+  for spec in $WT_CACHE_DIRS; do
+    cache_spec "$spec"; vols="$vols $(cache_volume "$WT_PREFIX$name" "$dir" "$label")"
+  done
+  [ -z "${vols// /}" ] || docker volume rm -f $vols >/dev/null 2>&1 || true
+  for r in $(repos_in "$dir"); do
+    git --git-dir="$(git -C "$dir/$r" rev-parse --path-format=absolute --git-common-dir)" worktree remove "$dir/$r"
+  done
+  # What wt made: wt.env, the generated .devcontainer and the agent-file links.
+  rm -rf "$dir/wt.env" "$dir/.devcontainer"
+  find "$dir" -mindepth 1 -maxdepth 1 -type l -exec rm {} +
+  rmdir "$dir" 2>/dev/null || die "$dir still holds files wt did not create: $(ls -A "$dir" | tr '\n' ' ')"
+  echo "removed $name"
+}
+
+ensure_shared() {
+  docker network create "$WT_NETWORK" >/dev/null 2>&1 || true
+  WT_HTTP_PORT=$WT_HTTP_PORT docker compose -f "$WT_CONFIG/compose.yaml" up -d >/dev/null
+  # Traefik reaches each profile's worktrees on that profile's network.
+  docker network connect "$WT_NETWORK" wt-traefik >/dev/null 2>&1 || true
+  [ -z "$WT_INFRA_PROBE_PORT" ] || nc -z 127.0.0.1 "$WT_INFRA_PROBE_PORT" 2>/dev/null \
+    || warn "shared infra is not answering on :$WT_INFRA_PROBE_PORT; start it on the host"
+}
+
+cmd_start() {
+  local fresh=""
+  if [ "${2:-}" = --fresh ]; then fresh=1; set -- "$1"; fi
+  [ $# -eq 1 ] || usage
+  local name=$1 dir mode c=$WT_PREFIX$1 up_args=()
+  dir=$(checked_dir "$name")
+  [ -d "$dir" ] || die "no worktree '$name'; run 'wt new' first"
+  command -v devcontainer >/dev/null || die "devcontainer CLI missing: npm i -g @devcontainers/cli"
+  mode=$(infra_mode "$dir")
+  [ -z "$fresh" ] || [ "$mode" = isolated ] || die "--fresh only applies to WT_INFRA=isolated"
+  generate "$name" "$dir"
+  ensure_shared
+  link_husky_init
+  # The CLI reuses an existing container as-is, so one built from an older config is replaced.
+  # Volumes (caches, agent logins, isolated data) survive; the container's own files do not.
+  if docker inspect "$c" >/dev/null 2>&1; then
+    if [ "$(docker inspect -f '{{index .Config.Labels "wt.config"}}' "$c")" != "$WT_GENERATED_HASH" ]; then
+      echo "wt: the config changed; recreating $c (volumes are kept)"
+      up_args=(--remove-existing-container)
+    fi
+  fi
+  devcontainer up --workspace-folder "$dir" ${up_args[@]+"${up_args[@]}"}
+  # The port forwards and the isolated infra compete for the same localhost ports, so the mode
+  # that is going away is torn down first. The CLI only re-runs postStartCommand when the
+  # container restarts, so a mode change on a running container needs this explicit wt-start.
+  if [ "$mode" = shared ]; then isolated "$name" down; fi
+  docker exec -u "$WT_USER" "$c" bash /opt/wt/engine/wt-start
+  if [ "$mode" = isolated ]; then
+    [ -z "$fresh" ] || isolated "$name" purge
+    isolated "$name" up
+  fi
+  echo "infra=$mode; open http://$c.$WT_DOMAIN$([ "$WT_HTTP_PORT" = 80 ] || echo ":$WT_HTTP_PORT")"
+  echo "IDE: open $dir, then \"Reopen in Container\" (README: Working in a worktree)"
+}
+
+cmd_up() {
+  cmd_new "$@"
+  cmd_start "$1"
+}
+
+cmd_sync() {
+  [ $# -eq 1 ] || usage
+  local dir
+  dir=$(checked_dir "$1")
+  [ -d "$dir" ] || die "no worktree '$1'"
+  generate "$1" "$dir"
+  echo "wrote $dir/.devcontainer/devcontainer.json"
+}
+
+cmd_exec() {
+  [ $# -ge 1 ] || usage
+  local name=$1 dir tty=-i
+  shift
+  dir=$(checked_dir "$name")
+  [ -d "$dir" ] || die "no worktree '$name'"
+  if [ -t 0 ] && [ -t 1 ]; then tty=-it; fi
+  [ $# -gt 0 ] || set -- bash
+  exec docker exec "$tty" -u "$WT_USER" -w "$dir" "$WT_PREFIX$name" "$@"
+}
+
+# Any MCP client that can launch a stdio server can drive the worktree's Chromium with this.
+cmd_mcp() {
+  [ $# -eq 1 ] || usage
+  checked_dir "$1" >/dev/null
+  echo "docker exec -i -u $WT_USER -w $WT_USER_HOME $WT_PREFIX$1 chrome-devtools-mcp --browserUrl http://127.0.0.1:9222 --no-usage-statistics"
+}
+
+# main
+cmd=${1:-}
+[ $# -eq 0 ] || shift
+case "$cmd" in
+  new|down|start|up|sync|exec|mcp|ls) load_config ;;
+  *) usage ;;
+esac
+case "$cmd" in
+  new)   cmd_new "$@" ;;
+  down)  cmd_down "$@" ;;
+  start) cmd_start "$@" ;;
+  up)    cmd_up "$@" ;;
+  sync)  cmd_sync "$@" ;;
+  exec)  cmd_exec "$@" ;;
+  mcp)   cmd_mcp "$@" ;;
+  ls)    cmd_ls ;;
+esac

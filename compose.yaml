@@ -1,0 +1,22 @@
+# Once per machine: Traefik routes <container>.<domain> to that worktree's desktop. It lives on its
+# own network; `wt start` also connects it to the profile's WT_NETWORK, and each worktree's
+# traefik.docker.network label says which one to reach it on, so profiles never fight over it.
+# WT_HTTP_PORT (environment only, default 80) is machine-wide for the same reason.
+name: wt-shared
+services:
+  traefik:
+    image: traefik:v3.7
+    container_name: wt-traefik
+    restart: unless-stopped
+    command:
+      - --providers.docker=true
+      - --providers.docker.exposedbydefault=false
+      - --entrypoints.web.address=:80
+    ports:
+      - "127.0.0.1:${WT_HTTP_PORT:-80}:80"   # loopback only: the desktops have no login
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks: [gateway]
+networks:
+  gateway:
+    name: wt-gateway
