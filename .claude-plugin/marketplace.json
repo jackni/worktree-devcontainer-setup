@@ -1,0 +1,15 @@
+{
+  "name": "jackni-plugins",
+  "description": "Plugins by jackni",
+  "owner": {
+    "name": "jackni",
+    "url": "https://github.com/jackni"
+  },
+  "plugins": [
+    {
+      "name": "worktree-devcontainers",
+      "source": "./",
+      "description": "A dev container per git worktree, each with its own desktop and Chromium, for running coding agents in parallel"
+    }
+  ]
+}

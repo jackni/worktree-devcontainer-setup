@@ -4,6 +4,8 @@ One container per worktree, each with its own desktop and Chromium at `http://wt
 for any set of repos and any coding agent. A person clicks through the app in the worktree's
 Chromium; an agent edits code in the worktree and drives the same Chromium over MCP.
 
+The problem it solves, how it works and an architecture diagram: [docs/overview.md](docs/overview.md).
+
 ## Layout
 
 ```text
@@ -45,6 +47,19 @@ up to coding in VS Code or Cursor. In short:
    profile may also live outside the engine: `WT_PROFILE=/path/to/folder`.
 5. Run `wt up <name> <branch>`, then open the worktree in your IDE (below) and its desktop at
    `http://wt-<name>.localhost`.
+
+### Or let Claude Code set it up
+
+This repo is also a Claude Code plugin. Its `wt` skill checks the host, copies the engine into your
+workspace, drafts a profile from your repos, and runs `wt` for you:
+
+```bash
+claude plugin install worktree-devcontainers --marketplace jackni/worktree-devcontainer-setup
+```
+
+Then ask Claude, for example, "set up wt so I can run two agents on web and api in parallel". The
+skill keeps the profile at `<workspace>/wt-profile/`, outside the engine, so `claude plugin update`
+and a re-install of the engine never touch it.
 
 ## Commands
 
@@ -306,6 +321,7 @@ host. For those repos, commit from the container: `wt exec <name> git -C <repo> 
 | `test/generic_test.sh` | No Docker except for `down`. Covers one repo, three repos, a made-up agent, custom naming, migration and bad profiles. |
 | `test/wt_git_test.sh` | Throwaway repos with a two-repo, two-agent profile: branches, rollback, what `down` refuses. |
 | `test/husky_init_test.sh` | A fake `docker`. |
+| `test/install_engine_test.sh` | Nothing. The plugin skill's engine install: fresh, upgrade, refusals. |
 | `test/image_test.sh` | Builds `WT_PROFILE`'s image (default: `example`). |
 | `test/container_test.sh` | Runs `wt-start` with a throwaway profile. |
 | `test/e2e_test.sh` | A real `wt up`/`start`/`down` through the devcontainer CLI and Traefik, with a one-repo profile and a made-up agent. Uses host port 80. |

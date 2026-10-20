@@ -1,0 +1,14 @@
+{
+  "name": "worktree-devcontainers",
+  "displayName": "Worktree Devcontainers",
+  "version": "0.1.0",
+  "description": "A dev container per git worktree, each with its own desktop and Chromium, so several coding agents can work on the same repos in parallel. Sets up and runs the wt engine.",
+  "author": {
+    "name": "jackni",
+    "url": "https://github.com/jackni"
+  },
+  "homepage": "https://github.com/jackni/worktree-devcontainer-setup/blob/main/docs/overview.md",
+  "repository": "https://github.com/jackni/worktree-devcontainer-setup",
+  "keywords": ["devcontainer", "git-worktree", "docker", "agents", "parallel"],
+  "agents": []
+}
