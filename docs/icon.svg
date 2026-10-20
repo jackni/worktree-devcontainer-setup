@@ -1,0 +1,49 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <!-- Source of .claude-plugin/icon.png: a git trunk branching into three worktrees, each its own window. -->
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#16213a"/>
+      <stop offset="1" stop-color="#0a0f1c"/>
+    </linearGradient>
+  </defs>
+  <rect width="1024" height="1024" rx="224" fill="url(#bg)"/>
+  <g transform="translate(-25 0)">
+
+  <!-- trunk -->
+  <line x1="228" y1="880" x2="228" y2="150" stroke="#64748b" stroke-width="40" stroke-linecap="round"/>
+
+  <!-- branches -->
+  <g fill="none" stroke-width="40" stroke-linecap="round">
+    <path d="M228 340 C 228 230, 300 230, 470 230" stroke="#22d3ee"/>
+    <path d="M228 610 C 228 500, 300 500, 470 500" stroke="#a78bfa"/>
+    <path d="M228 880 C 228 770, 300 770, 470 770" stroke="#fbbf24"/>
+  </g>
+
+  <!-- commits on the trunk -->
+  <g fill="#0a0f1c" stroke="#cbd5e1" stroke-width="22">
+    <circle cx="228" cy="150" r="34"/>
+  </g>
+
+  <!-- one window per worktree -->
+  <g stroke-width="22">
+    <g>
+      <rect x="470" y="130" width="400" height="200" rx="40" fill="#0f1a2e" stroke="#22d3ee"/>
+      <path d="M481 196 H859" stroke="#22d3ee" stroke-width="14"/>
+      <g fill="#22d3ee" stroke="none"><circle cx="522" cy="165" r="12"/><circle cx="560" cy="165" r="12"/><circle cx="598" cy="165" r="12"/></g>
+      <g stroke="#22d3ee" stroke-width="18" stroke-linecap="round" opacity="0.55"><path d="M520 250 H720"/><path d="M520 290 H640"/></g>
+    </g>
+    <g>
+      <rect x="470" y="400" width="400" height="200" rx="40" fill="#0f1a2e" stroke="#a78bfa"/>
+      <path d="M481 466 H859" stroke="#a78bfa" stroke-width="14"/>
+      <g fill="#a78bfa" stroke="none"><circle cx="522" cy="435" r="12"/><circle cx="560" cy="435" r="12"/><circle cx="598" cy="435" r="12"/></g>
+      <g stroke="#a78bfa" stroke-width="18" stroke-linecap="round" opacity="0.55"><path d="M520 520 H760"/><path d="M520 560 H680"/></g>
+    </g>
+    <g>
+      <rect x="470" y="670" width="400" height="200" rx="40" fill="#0f1a2e" stroke="#fbbf24"/>
+      <path d="M481 736 H859" stroke="#fbbf24" stroke-width="14"/>
+      <g fill="#fbbf24" stroke="none"><circle cx="522" cy="705" r="12"/><circle cx="560" cy="705" r="12"/><circle cx="598" cy="705" r="12"/></g>
+      <g stroke="#fbbf24" stroke-width="18" stroke-linecap="round" opacity="0.55"><path d="M520 790 H700"/><path d="M520 830 H620"/></g>
+    </g>
+  </g>
+  </g>
+</svg>
