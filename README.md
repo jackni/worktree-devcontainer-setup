@@ -113,7 +113,7 @@ itself, and there is no telemetry.
 - **In the containers:**
   - `chrome-devtools-mcp` runs with `--no-usage-statistics`.
   - The agents you start talk to their own providers, as they do on your machine.
-  - API keys you pass with `'KEY=${localEnv:KEY}'` in the profile's `WT_ENV` go into the
+  - Values you pass with `'VAR=${localEnv:VAR}'` in the profile's `WT_ENV` go into the
     container's environment and nowhere else.
 
 ## Commands
