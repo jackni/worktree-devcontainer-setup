@@ -2,7 +2,7 @@
 
 A dev container per git worktree, each with its own desktop and Chromium, so several coding agents,
 or an agent and you, can work on the same repos at the same time. It ships as `wt`, a small bash
-engine, and as a Claude Code plugin whose skill sets the engine up and runs it for you.
+engine, and as a Claude Code and Cursor plugin whose skill sets the engine up and runs it for you.
 
 Author: [jackni](https://github.com/jackni) ·
 Source: [github.com/jackni/worktree-devcontainer-setup](https://github.com/jackni/worktree-devcontainer-setup)
@@ -50,9 +50,10 @@ lose work: uncommitted changes, or ignored files such as `.env` that exist nowhe
 Everything project-specific lives in a **profile** (`wt.conf`): the repos, base image, cache
 folders, host ports and agents. The engine knows no project, so one engine serves any stack.
 
-The **Claude Code plugin** adds a skill that does the setup when you ask in plain words, e.g. "set
-up wt so I can run two agents on web and api in parallel". It checks the host, copies the engine
-into your workspace, drafts the profile from what your repos contain, and runs `wt`.
+The **Claude Code and Cursor plugin** adds a skill that does the setup when you ask in plain
+words, e.g. "set up wt so I can run two agents on web and api in parallel". It checks the host,
+copies the engine into your workspace, drafts the profile from what your repos contain, and runs
+`wt`.
 
 ### What it is not
 
@@ -132,7 +133,7 @@ Traefik reaches the other tasks' desktops.
 | `wt-start` | Container, on every start | Starts the desktop, Chromium and the port forwards, hands volume mount points to the user, runs the profile's hooks |
 | Traefik | Docker, one per machine | Routes `wt-<name>.localhost` to that container's desktop, on loopback only |
 | `husky-init.sh` | Host, inside git hooks | Runs a worktree's husky hooks in its container, where `node_modules` lives |
-| The `wt` skill | Claude Code | Checks the host, installs the engine into your workspace, drafts the profile, runs `wt` |
+| The `wt` skill | Claude Code or Cursor | Checks the host, installs the engine into your workspace, drafts the profile, runs `wt` |
 
 ### What `wt up` does
 
@@ -195,6 +196,7 @@ In Claude Code:
 claude plugin install worktree-devcontainers --marketplace jackni/worktree-devcontainer-setup
 ```
 
-Then ask Claude to set it up. Without Claude Code, follow
+In Cursor, the same repo is a Cursor plugin; the README's "Or let Cursor set it up" covers the
+install. Then ask the agent to set it up. Without either, follow
 [GETTING-STARTED.md](../GETTING-STARTED.md); the [README](../README.md) covers every command and
 setting.
