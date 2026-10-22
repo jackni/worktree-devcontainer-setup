@@ -85,10 +85,25 @@ and a re-install of the engine never touch it.
 The plugin works in Claude Code on a machine with Docker. It does nothing on claude.ai or in Cowork,
 which have no Docker.
 
+### Or let Cursor set it up
+
+The same repo is a Cursor plugin (`.cursor-plugin/plugin.json`), with the same `wt` skill. Until it
+is listed in the Cursor Marketplace, install it as a local plugin:
+
+```bash
+git clone https://github.com/jackni/worktree-devcontainer-setup ~/.cursor/plugins/local/worktree-devcontainers
+```
+
+Then run **Developer: Reload Window**, check that the `wt` skill shows up under **Customize**, and
+ask the agent as above. Clone or copy the folder there: Cursor only loads a symlink that points
+inside `~/.cursor/plugins/local/`. To update, `git -C ~/.cursor/plugins/local/worktree-devcontainers pull`,
+then ask the agent to upgrade the engine. On Cursor Enterprise, an admin has to turn on **Allow
+Local Plugin Imports** first.
+
 ### What the plugin and wt run, write and download
 
-Claude shows each command before it runs it. Nothing is sent anywhere by the plugin or by `wt`
-itself, and there is no telemetry.
+Claude Code and Cursor ask before running each command, unless you have let them run commands on
+their own. Nothing is sent anywhere by the plugin or by `wt` itself, and there is no telemetry.
 
 - **The skill's scripts:**
   - `check-prereqs.sh` only reads: the git and Docker versions, `docker info`, and whether
@@ -244,7 +259,8 @@ Every worktree's Chromium listens on CDP `:9222` inside its container, and the i
 ```bash
 claude mcp add wt-<name>-browser -- $(wt mcp <name>)            # Claude Code
 codex mcp add wt-<name>-browser -- $(wt mcp <name>)             # Codex
-# others: { "command": "docker", "args": [ ...the words wt mcp prints, after "docker"... ] }
+# Cursor (~/.cursor/mcp.json) and others:
+# { "command": "docker", "args": [ ...the words wt mcp prints, after "docker"... ] }
 ```
 
 Watch it in the desktop tab, and don't click while the agent is driving. To recover a stuck browser:

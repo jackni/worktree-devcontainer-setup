@@ -19,6 +19,8 @@ check "  the shipped agents"                   test -f "$eng/agents/claude.sh" -
 check "  the example profile"                  test -f "$eng/profiles/example/wt.conf"
 check "  records the plugin version"           grep -qx "$(sed -n 's/^ *"version": *"\([^"]*\)".*/\1/p' "$here/../.claude-plugin/plugin.json")" "$eng/.engine-version"
 check "  leaves the plugin's own files out"    test ! -e "$eng/.claude-plugin" -a ! -e "$eng/skills" -a ! -e "$eng/test"
+check "  the Cursor manifest has the same version" test "$(sed -n 's/^ *"version": *"\([^"]*\)".*/\1/p' "$here/../.cursor-plugin/plugin.json")" = "$(cat "$eng/.engine-version")"
+check "  leaves the Cursor manifest out"      test ! -e "$eng/.cursor-plugin"
 
 # what the skill then sets up: a profile beside the engine, linked from it
 mkdir -p "$ws/wt-profile" && echo 'WT_REPO_LIST=app' > "$ws/wt-profile/wt.conf"

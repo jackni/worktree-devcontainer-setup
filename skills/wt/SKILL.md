@@ -10,12 +10,15 @@ and runs one dev container for it. Each container has its own packages, desktop,
 an agent drives over MCP. Docker, the devcontainer CLI and git are all it needs on the host; the
 project's languages and tools live only in the containers.
 
-This plugin carries the engine at `${CLAUDE_PLUGIN_ROOT}`. Its docs are the reference for anything
-this file doesn't cover; read the relevant part when you need it rather than guessing:
+This plugin carries the engine at its root, written `<plugin>` below. In Claude Code that is
+`${CLAUDE_PLUGIN_ROOT}`; in Cursor and other agents it is `../..` from this skill's folder (the
+folder containing this `SKILL.md`), the folder holding both `wt` and `Dockerfile`. Use its absolute
+path in commands. Its docs are the reference for anything this file doesn't cover; read the
+relevant part when you need it rather than guessing:
 
-- `${CLAUDE_PLUGIN_ROOT}/profiles/example/wt.conf`: every profile setting, with its default
-- `${CLAUDE_PLUGIN_ROOT}/README.md`: commands, agents, infra modes, what `wt down` refuses, git hooks
-- `${CLAUDE_PLUGIN_ROOT}/GETTING-STARTED.md`: per-OS setup, and an "If something goes wrong" table
+- `<plugin>/profiles/example/wt.conf`: every profile setting, with its default
+- `<plugin>/README.md`: commands, agents, infra modes, what `wt down` refuses, git hooks
+- `<plugin>/GETTING-STARTED.md`: per-OS setup, and an "If something goes wrong" table
 
 ## The layout wt expects
 
@@ -46,7 +49,7 @@ folders outside the current project.
 2. **Check the host:**
 
    ```bash
-   bash "${CLAUDE_PLUGIN_ROOT}/skills/wt/scripts/check-prereqs.sh" <workspace>
+   bash "<plugin>/skills/wt/scripts/check-prereqs.sh" <workspace>
    ```
 
    Every `FAIL` blocks wt; tell the user how to fix each one (the script says how) and stop until
@@ -55,7 +58,7 @@ folders outside the current project.
 3. **Install the engine:**
 
    ```bash
-   bash "${CLAUDE_PLUGIN_ROOT}/skills/wt/scripts/install-engine.sh" <workspace>
+   bash "<plugin>/skills/wt/scripts/install-engine.sh" <workspace>
    ```
 
    Re-running it later upgrades the engine and leaves profiles and worktrees alone. Pass on the
@@ -121,10 +124,20 @@ ships `chrome-devtools-mcp`. Where the agent runs decides how it connects:
   ```
 
 - **An agent on the host** reaches one worktree's Chromium through `docker exec`; `wt mcp <name>`
-  prints that command:
+  prints that command. In Claude Code:
 
   ```bash
   claude mcp add wt-<name>-browser -- $(wt mcp <name>)
+  ```
+
+  In Cursor, add a server to `~/.cursor/mcp.json` (or the project's `.cursor/mcp.json`), with
+  `docker` as the command and the rest of what `wt mcp <name>` prints as the arguments:
+
+  ```json
+  { "mcpServers": { "wt-<name>-browser": {
+      "command": "docker",
+      "args": ["exec", "-i", "-u", "<user>", "-w", "<home>", "<container>", "chrome-devtools-mcp",
+               "--browserUrl", "http://127.0.0.1:9222", "--no-usage-statistics"] } } }
   ```
 
 The user watches either at `http://wt-<name>.localhost`, and shouldn't click while the agent drives.
