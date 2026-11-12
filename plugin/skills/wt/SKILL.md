@@ -10,30 +10,30 @@ and runs one dev container for it. Each container has its own packages, desktop,
 an agent drives over MCP. Docker, the devcontainer CLI and git are all it needs on the host; the
 project's languages and tools live only in the containers.
 
-This plugin carries the engine at its root, written `<plugin>` below. In Claude Code that is
-`${CLAUDE_PLUGIN_ROOT}`; in Cursor and other agents it is `../..` from this skill's folder (the
-folder containing this `SKILL.md`), the folder holding both `wt` and `Dockerfile`. Use its absolute
-path in commands. Its docs are the reference for anything this file doesn't cover; read the
-relevant part when you need it rather than guessing:
+This plugin holds only this skill. The engine (`wt`, its Dockerfile and the rest) lives in the
+GitHub repo `jackni/worktree-devcontainer-setup`, and the skill installs it in the user's workspace
+as a git clone of tag `v0.2.0`, the engine version this skill was written for. Below, `<engine>` is
+that clone, `<workspace>/worktree-devcontainers`; use its absolute path in commands. Its docs are
+the reference for anything this file doesn't cover; read the relevant part when you need it rather
+than guessing:
 
-- `<plugin>/profiles/example/wt.conf`: every profile setting, with its default
-- `<plugin>/README.md`: commands, agents, infra modes, what `wt down` refuses, git hooks
-- `<plugin>/GETTING-STARTED.md`: per-OS setup, and an "If something goes wrong" table
+- `<engine>/profiles/example/wt.conf`: every profile setting, with its default
+- `<engine>/README.md`: commands, agents, infra modes, what `wt down` refuses, git hooks
+- `<engine>/GETTING-STARTED.md`: per-OS setup, and an "If something goes wrong" table
 
 ## The layout wt expects
 
 ```text
 <workspace>/                    WT_HOME
-  worktree-devcontainers/       the engine (installed by this skill)
+  worktree-devcontainers/       the engine: a git clone made by this skill
     profile -> ../wt-profile    which profile wt uses
   wt-profile/wt.conf            the user's profile: repos, image, caches, ports, agents
   <repo>/ ...                   main checkouts (or elsewhere, via WT_REPOS)
   worktrees/<name>/             made by wt
 ```
 
-`wt` finds everything relative to its own folder, which is why the engine is copied into the
-workspace rather than run from this plugin: the plugin's folder changes on every update, and the
-containers and the husky hook link point at the engine's path.
+`wt` finds everything relative to its own folder, and the containers and the husky hook link point
+at the engine's path, so the engine stays in one place in the workspace and upgrades happen there.
 
 ## Setting up a workspace
 
@@ -44,30 +44,47 @@ folders outside the current project.
    `worktrees/`. If the user's repos sit together in a folder that holds nothing else, that folder
    works. Otherwise suggest a new one such as `~/work/<project>-ws` and point `WT_REPOS` at the
    folder holding the checkouts. If a workspace already has an engine (a folder holding both `wt`
-   and `Dockerfile`), reuse it.
+   and `Dockerfile`), reuse it: that folder is `<engine>` from here on.
 
-2. **Check the host:**
+2. **Install or upgrade the engine.** Tell the user this downloads the engine's code from GitHub,
+   and show the command before running it. Which command depends on what is at `<engine>`:
+
+   - **Nothing:** clone the tag.
+
+     ```bash
+     git clone --branch v0.2.0 https://github.com/jackni/worktree-devcontainer-setup.git <engine>
+     ```
+
+   - **A git clone** (it has `.git`): `git -C <engine> describe --tags` names its version. If that
+     isn't `v0.2.0`, offer to move it there. Files the clone doesn't track, such as the `profile`
+     link and agents the user added in `agents/`, stay. If git refuses because of local changes,
+     show them to the user and let them decide.
+
+     ```bash
+     git -C <engine> fetch --tags origin && git -C <engine> checkout v0.2.0
+     ```
+
+   - **A folder without `.git`** (versions of this plugin before 0.2.0 copied the engine there):
+     rename it to `<engine>.old`, clone as above, then bring back what the user made in it: the
+     `profile` link, and any files in `agents/` and folders in `profiles/` that the clone doesn't
+     have. Leave `<engine>.old` in place and tell the user they can delete it once wt works.
+
+   Tell the user how to run `wt` in their own terminal: `export PATH="<engine>:$PATH"` (a symlink
+   to `wt` does not work).
+
+3. **Check the host:**
 
    ```bash
-   bash "<plugin>/skills/wt/scripts/check-prereqs.sh" <workspace>
+   bash <engine>/check-prereqs.sh <workspace>
    ```
 
    Every `FAIL` blocks wt; tell the user how to fix each one (the script says how) and stop until
-   they have. A `warn` about port 80 means exporting `WT_HTTP_PORT` before every `wt` command.
-
-3. **Install the engine:**
-
-   ```bash
-   bash "<plugin>/skills/wt/scripts/install-engine.sh" <workspace>
-   ```
-
-   Re-running it later upgrades the engine and leaves profiles and worktrees alone. Pass on the
-   `PATH` line it prints, so the user can run `wt` in their own terminal.
+   they have. A `warn` about port 80 means exporting `WT_HTTP_PORT` before every `wt` command. If
+   the clone itself failed because git is missing, the user needs git 2.31 or later first.
 
 4. **Write the profile** at `<workspace>/wt-profile/wt.conf`, then link it:
-   `ln -sfn ../wt-profile <workspace>/worktree-devcontainers/profile`. Keeping it outside the engine
-   means engine upgrades never touch it. Start from the example's settings and fill in what the
-   repos tell you:
+   `ln -sfn ../wt-profile <engine>/profile`. Keeping it outside the engine means engine upgrades
+   never touch it. Start from the example's settings and fill in what the repos tell you:
 
    | In the repos | Setting |
    | --- | --- |
@@ -76,7 +93,7 @@ folders outside the current project.
    | `pyproject.toml`, `requirements*.txt` | `WT_IMAGE_SETUP='apt-get update && apt-get install -y python3-venv python3-pip'`, and `<repo>/.venv` in `WT_CACHE_DIRS` |
    | `*.csproj`, `go.mod`, other stacks | A matching `mcr.microsoft.com/devcontainers/<stack>:<version>-noble` as `WT_BASE_IMAGE`, or an install in `WT_IMAGE_SETUP`. The base must be a Debian/Ubuntu release KasmVNC and Playwright ship for. |
    | A compose file or `.env.example` naming local services | Their ports in `WT_SHARED_PORTS="5432 6379"`, so `localhost` in the container reaches them on the host |
-   | Which agents the user runs | `WT_AGENTS="claude codex"`; files from `agents/` |
+   | Which agents the user runs | `WT_AGENTS="claude codex"`; files from `<engine>/agents/` |
    | A `CLAUDE.md` or `AGENTS.md` the user keeps in the workspace | Nothing: each agent links its workspace files into every worktree |
 
    Only list folders a tool regenerates in `WT_CACHE_DIRS`. Their contents live in a volume that
@@ -85,8 +102,7 @@ folders outside the current project.
 
 ## Creating and using worktrees
 
-Run wt by its full path (`<workspace>/worktree-devcontainers/wt`) unless it is on `PATH` in your
-shell.
+Run wt by its full path (`<engine>/wt`) unless it is on `PATH` in your shell.
 
 ```bash
 wt up <name> <branch>...     # git worktrees + config, then build and start the container
@@ -163,7 +179,7 @@ running it on their machine.
 
 ## When something fails
 
-Read `GETTING-STARTED.md`'s "If something goes wrong" table first. The most common causes:
+Read `<engine>/GETTING-STARTED.md`'s "If something goes wrong" table first. The most common causes:
 
 | Symptom | Cause and fix |
 | --- | --- |

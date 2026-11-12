@@ -8,7 +8,7 @@
   "plugins": [
     {
       "name": "worktree-devcontainers",
-      "source": "./",
+      "source": "./plugin",
       "description": "A dev container per git worktree, each with its own desktop and Chromium, for running coding agents in parallel"
     }
   ]

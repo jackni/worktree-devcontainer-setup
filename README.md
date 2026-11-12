@@ -32,10 +32,11 @@ How it works, with an architecture diagram and the design decisions: [docs/overv
 ```text
 <workspace>/                  WT_HOME: the folder holding this one
   <this folder>/              the engine: wt, wt-start, Dockerfile, compose.yaml, husky-init.sh,
-                              GETTING-STARTED.md (start here)
+                              check-prereqs.sh, GETTING-STARTED.md (start here)
     agents/<agent>.sh         one file per coding agent (claude, codex, gemini, or yours)
     profiles/<name>/wt.conf   one per setup: repos, image, ports, caches, agents
     profile -> profiles/...   the default profile (or set WT_PROFILE)
+    plugin/                   the Claude Code and Cursor plugin: the wt skill only
   <repo>/ ...                 main checkouts, one per name in the profile's WT_REPO_LIST
   worktrees/<name>/           made by `wt new`
     .devcontainer/            generated: devcontainer.json + wt.meta
@@ -71,44 +72,52 @@ up to coding in VS Code or Cursor. In short:
 
 ### Or let Claude Code set it up
 
-This repo is also a Claude Code plugin. Its `wt` skill checks the host, copies the engine into your
-workspace, drafts a profile from your repos, and runs `wt` for you:
+This repo also holds a Claude Code plugin, in `plugin/`. Its `wt` skill clones this repo into your
+workspace at the tag that matches the plugin's version, checks the host, drafts a profile from your
+repos, and runs `wt` for you:
 
 ```bash
 claude plugin install worktree-devcontainers --marketplace jackni/worktree-devcontainer-setup
 ```
 
 Then ask Claude, for example, "set up wt so I can run two agents on web and api in parallel". The
-skill keeps the profile at `<workspace>/wt-profile/`, outside the engine, so `claude plugin update`
-and a re-install of the engine never touch it.
+skill keeps the profile at `<workspace>/wt-profile/`, outside the engine, so moving the engine's
+clone to a newer tag never touches it.
+
+The plugin holds only the skill, as Markdown and JSON: Anthropic's directory accepts no scripts from
+publishers it hasn't verified, so the engine comes from this repo instead of inside the plugin.
 
 The plugin works in Claude Code on a machine with Docker. It does nothing on claude.ai or in Cowork,
 which have no Docker.
 
 ### Or let Cursor set it up
 
-The same repo is a Cursor plugin (`.cursor-plugin/plugin.json`), with the same `wt` skill. Until it
-is listed in the Cursor Marketplace, install it as a local plugin:
+`plugin/` is a Cursor plugin too (`plugin/.cursor-plugin/plugin.json`), with the same `wt` skill.
+Until it is listed in the Cursor Marketplace, install it as a local plugin by copying that folder:
 
 ```bash
-git clone https://github.com/jackni/worktree-devcontainer-setup ~/.cursor/plugins/local/worktree-devcontainers
+git clone --depth 1 https://github.com/jackni/worktree-devcontainer-setup /tmp/wt-src
+mkdir -p ~/.cursor/plugins/local
+cp -R /tmp/wt-src/plugin ~/.cursor/plugins/local/worktree-devcontainers && rm -rf /tmp/wt-src
 ```
 
 Then run **Developer: Reload Window**, check that the `wt` skill shows up under **Customize**, and
-ask the agent as above. Clone or copy the folder there: Cursor only loads a symlink that points
-inside `~/.cursor/plugins/local/`. To update, `git -C ~/.cursor/plugins/local/worktree-devcontainers pull`,
-then ask the agent to upgrade the engine. On Cursor Enterprise, an admin has to turn on **Allow
-Local Plugin Imports** first.
+ask the agent as above. Copy the folder rather than link to it: Cursor only loads a symlink that
+points inside `~/.cursor/plugins/local/`. To update, delete
+`~/.cursor/plugins/local/worktree-devcontainers`, run the commands again, then ask the agent to
+upgrade the engine. On Cursor Enterprise, an admin has to turn on **Allow Local Plugin Imports**
+first.
 
 ### What the plugin and wt run, write and download
 
 Claude Code and Cursor ask before running each command, unless you have let them run commands on
 their own. Nothing is sent anywhere by the plugin or by `wt` itself, and there is no telemetry.
 
-- **The skill's scripts:**
-  - `check-prereqs.sh` only reads: the git and Docker versions, `docker info`, and whether
-    `127.0.0.1:80` is free.
-  - `install-engine.sh` copies the engine's files into the workspace folder you choose.
+- **The skill:**
+  - clones this repo with git into the workspace folder you choose, at the tag that matches the
+    plugin's version, or moves an existing clone to that tag;
+  - runs the engine's `check-prereqs.sh`, which only reads: the git and Docker versions,
+    `docker info`, and whether `127.0.0.1:80` is free.
 - **`wt` on your machine:**
   - **Git:** runs git in your repos (`worktree add`, and `fetch` from their remote for a new
     branch).
@@ -392,11 +401,20 @@ host. For those repos, commit from the container: `wt exec <name> git -C <repo> 
 | `test/generic_test.sh` | No Docker except for `down`. Covers one repo, three repos, a made-up agent, custom naming, migration and bad profiles. |
 | `test/wt_git_test.sh` | Throwaway repos with a two-repo, two-agent profile: branches, rollback, what `down` refuses. |
 | `test/husky_init_test.sh` | A fake `docker`. |
-| `test/install_engine_test.sh` | Nothing. The plugin skill's engine install: fresh, upgrade, refusals. |
+| `test/plugin_test.sh` | Nothing. `plugin/` against the directory's file rules for unverified publishers (Markdown, JSON and PNG only, nothing starting with `#!`), and one version across both manifests and the tag the skill clones. |
 | `test/image_test.sh` | Builds `WT_PROFILE`'s image (default: `example`). |
 | `test/container_test.sh` | Runs `wt-start` with a throwaway profile. |
 | `test/e2e_test.sh` | A real `wt up`/`start`/`down` through the devcontainer CLI and Traefik, with a one-repo profile and a made-up agent. Uses host port 80. |
 | `profiles/<name>/test/` | Each profile's own end-to-end checks. |
+
+## Releasing
+
+1. In one PR, raise `version` in `plugin/.claude-plugin/plugin.json` and
+   `plugin/.cursor-plugin/plugin.json`, and the tag in `plugin/skills/wt/SKILL.md`.
+   `test/plugin_test.sh` checks that the three match.
+2. After merging, tag the merge commit and push the tag: `git tag v<version>` and
+   `git push origin v<version>`. The skill clones that tag, so it has to exist before anyone
+   installs the new version.
 
 ## License
 

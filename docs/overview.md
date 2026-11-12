@@ -51,8 +51,8 @@ Everything project-specific lives in a **profile** (`wt.conf`): the repos, base 
 folders, host ports and agents. The engine knows no project, so one engine serves any stack.
 
 The **Claude Code and Cursor plugin** adds a skill that does the setup when you ask in plain
-words, e.g. "set up wt so I can run two agents on web and api in parallel". It checks the host,
-copies the engine into your workspace, drafts the profile from what your repos contain, and runs
+words, e.g. "set up wt so I can run two agents on web and api in parallel". It clones the engine
+into your workspace, checks the host, drafts the profile from what your repos contain, and runs
 `wt`.
 
 ### What it is not
@@ -176,9 +176,10 @@ sequenceDiagram
   lets a profile run per-task databases instead.
 - **Hooks run where the packages are.** A commit from the host in a husky repo runs its hooks in the
   task's container, so lint and tests use the container's `node_modules`.
-- **The engine is copied into your workspace.** `wt` finds everything next to itself, and a plugin's
-  folder moves on every update, so the skill installs the engine beside your repos and keeps your
-  profile outside it.
+- **The engine is a git clone in your workspace.** `wt` finds everything next to itself, so the
+  plugin holds only the skill, and the skill clones the engine beside your repos at the plugin's
+  version and keeps your profile outside it. That also keeps scripts out of the plugin, which
+  Anthropic's directory accepts only from publishers it has verified.
 
 ### Trade-offs
 
@@ -196,7 +197,7 @@ In Claude Code:
 claude plugin install worktree-devcontainers --marketplace jackni/worktree-devcontainer-setup
 ```
 
-In Cursor, the same repo is a Cursor plugin; the README's "Or let Cursor set it up" covers the
-install. Then ask the agent to set it up. Without either, follow
+In Cursor, the same `plugin/` folder is a Cursor plugin; the README's "Or let Cursor set it up"
+covers the install. Then ask the agent to set it up. Without either, follow
 [GETTING-STARTED.md](../GETTING-STARTED.md); the [README](../README.md) covers every command and
 setting.
